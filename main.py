@@ -1,7 +1,7 @@
 """
 Screenshot Telegram Bot APK
-Version: 4.0 - Accessibility Service
-Auto-start, No repeated permissions
+Version: 5.0 - Shizuku/ADB Method
+Commands: /startlive, /stoplive, /screenshot, /status
 """
 
 from kivy.app import App
@@ -21,6 +21,7 @@ import threading
 import requests
 import os
 import time
+import subprocess
 from datetime import datetime
 
 if platform != 'android':
@@ -29,17 +30,6 @@ if platform != 'android':
 if platform == 'android':
     from android.permissions import request_permissions, Permission
     from android.storage import primary_external_storage_path
-    from android import mActivity
-    from jnius import autoclass, cast
-    
-    # Android classes
-    PythonActivity = autoclass('org.kivy.android.PythonActivity')
-    Context = autoclass('android.content.Context')
-    Intent = autoclass('android.content.Intent')
-    Settings = autoclass('android.provider.Settings')
-    Uri = autoclass('android.net.Uri')
-    Build = autoclass('android.os.Build')
-    Environment = autoclass('android.os.Environment')
 
 
 class TelegramBot:
@@ -112,7 +102,7 @@ class TelegramBot:
 
 
 class ScreenshotHandler:
-    """Screenshot using root-less method"""
+    """Screenshot using Shizuku/ADB method"""
     
     def __init__(self):
         self.save_path = self._get_save_path()
@@ -134,7 +124,7 @@ class ScreenshotHandler:
             pass
     
     def capture(self):
-        """Take screenshot"""
+        """Take screenshot using multiple methods"""
         try:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             filename = f'screenshot_{timestamp}.png'
@@ -149,54 +139,51 @@ class ScreenshotHandler:
             return None
     
     def _capture_android(self, filepath):
-        """Android screenshot using multiple methods"""
+        """Android screenshot using Shizuku/shell method"""
         
-        # Method 1: screencap command
+        methods = [
+            # Method 1: Direct screencap via Shizuku
+            f'screencap -p {filepath}',
+            # Method 2: Via sh
+            f'sh -c "screencap -p {filepath}"',
+            # Method 3: Full path
+            f'/system/bin/screencap -p {filepath}',
+        ]
+        
+        for i, cmd in enumerate(methods):
+            try:
+                # Try using subprocess
+                result = subprocess.run(
+                    cmd.split() if i == 0 else ['sh', '-c', cmd],
+                    capture_output=True,
+                    timeout=10
+                )
+                
+                if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                    print(f"Method {i+1} worked!")
+                    return filepath
+                    
+            except Exception as e:
+                print(f"Method {i+1} failed: {e}")
+                continue
+        
+        # Method 4: Using os.system
         try:
-            result = os.system(f'screencap -p "{filepath}"')
-            if result == 0 and os.path.exists(filepath):
+            os.system(f'screencap -p {filepath}')
+            if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
                 return filepath
         except:
             pass
         
-        # Method 2: Using su (if rooted)
+        # Method 5: Try via app_process (Shizuku method)
         try:
-            result = os.system(f'su -c "screencap -p {filepath}"')
-            if result == 0 and os.path.exists(filepath):
+            cmd = f'app_process -Djava.class.path=/system/framework/screencap.jar /system/bin com.android.commands.screencap.Screencap -p {filepath}'
+            os.system(cmd)
+            if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
                 return filepath
         except:
             pass
         
-        # Method 3: Using shell
-        try:
-            import subprocess
-            result = subprocess.run(
-                ['sh', '-c', f'screencap -p "{filepath}"'],
-                capture_output=True,
-                timeout=10
-            )
-            if os.path.exists(filepath):
-                return filepath
-        except:
-            pass
-        
-        # Method 4: Using View drawing (captures app only)
-        try:
-            return self._capture_view(filepath)
-        except:
-            pass
-        
-        return None
-    
-    def _capture_view(self, filepath):
-        """Capture current app view"""
-        try:
-            from kivy.core.window import Window
-            Window.screenshot(name=filepath)
-            if os.path.exists(filepath):
-                return filepath
-        except:
-            pass
         return None
     
     def _capture_pc(self, filepath):
@@ -251,7 +238,7 @@ class SettingsPopup(Popup):
         )
         layout.add_widget(self.interval_input)
         
-        # Auto-start checkbox simulation
+        # Auto-start
         auto_layout = BoxLayout(size_hint_y=None, height=dp(40))
         auto_layout.add_widget(Label(text="Auto-start on boot:"))
         self.auto_start_btn = Button(
@@ -276,26 +263,25 @@ class SettingsPopup(Popup):
         
         layout.add_widget(btn_layout)
         
-        # Permission button
-        if platform == 'android':
-            perm_btn = Button(
-                text="Grant All Permissions",
-                size_hint_y=None,
-                height=dp(45),
-                background_color=(1, 0.5, 0, 1)
-            )
-            perm_btn.bind(on_press=self.grant_permissions)
-            layout.add_widget(perm_btn)
-        
         self.status_label = Label(text="", size_hint_y=None, height=dp(25))
         layout.add_widget(self.status_label)
         
-        # Commands help
-        help_label = Label(
-            text="Commands:\n/startlive - Start\n/stoplive - Stop\n/screenshot - One\n/status - Status",
+        # Shizuku status
+        shizuku_label = Label(
+            text="Make sure Shizuku is running!\nOpen Shizuku app to check.",
             size_hint_y=None,
-            height=dp(80),
-            font_size=dp(11)
+            height=dp(50),
+            font_size=dp(11),
+            color=(1, 0.8, 0, 1)
+        )
+        layout.add_widget(shizuku_label)
+        
+        # Commands
+        help_label = Label(
+            text="Commands:\n/startlive /stoplive /screenshot /status /help",
+            size_hint_y=None,
+            height=dp(40),
+            font_size=dp(10)
         )
         layout.add_widget(help_label)
         
@@ -308,26 +294,6 @@ class SettingsPopup(Popup):
         else:
             instance.text = "OFF"
             instance.background_color = (0.8, 0.2, 0.2, 1)
-    
-    def grant_permissions(self, instance):
-        """Open Android settings for permissions"""
-        if platform == 'android':
-            try:
-                # Request runtime permissions
-                request_permissions([
-                    Permission.WRITE_EXTERNAL_STORAGE,
-                    Permission.READ_EXTERNAL_STORAGE,
-                    Permission.INTERNET,
-                    Permission.RECEIVE_BOOT_COMPLETED,
-                    Permission.FOREGROUND_SERVICE,
-                    Permission.SYSTEM_ALERT_WINDOW,
-                    Permission.WAKE_LOCK
-                ])
-                
-                self.status_label.text = "Permissions requested!"
-                
-            except Exception as e:
-                self.status_label.text = f"Error: {e}"
     
     def test_connection(self, instance):
         self.status_label.text = "Testing..."
@@ -371,12 +337,22 @@ class MainScreen(BoxLayout):
         
         # Title
         self.add_widget(Label(
-            text="Screenshot Bot v4",
+            text="Screenshot Bot v5",
             font_size=dp(26),
             size_hint_y=None,
             height=dp(50),
             bold=True
         ))
+        
+        # Shizuku reminder
+        self.shizuku_label = Label(
+            text="⚠️ Make sure Shizuku is running!",
+            font_size=dp(12),
+            size_hint_y=None,
+            height=dp(25),
+            color=(1, 0.8, 0, 1)
+        )
+        self.add_widget(self.shizuku_label)
         
         # Status
         self.status_label = Label(
@@ -417,6 +393,16 @@ class MainScreen(BoxLayout):
         self.screenshot_btn.bind(on_press=self.take_manual_screenshot)
         self.add_widget(self.screenshot_btn)
         
+        # Test screenshot button
+        test_btn = Button(
+            text="Test Screenshot (Local)",
+            size_hint_y=None,
+            height=dp(40),
+            background_color=(0.6, 0.4, 0.8, 1)
+        )
+        test_btn.bind(on_press=self.test_screenshot)
+        self.add_widget(test_btn)
+        
         # Settings button
         settings_btn = Button(
             text="Settings",
@@ -432,7 +418,7 @@ class MainScreen(BoxLayout):
         
         scroll = ScrollView(size_hint=(1, 1))
         self.log_text = Label(
-            text="App ready...\n",
+            text="App ready. Make sure Shizuku is running!\n",
             size_hint_y=None,
             halign='left',
             valign='top',
@@ -447,11 +433,10 @@ class MainScreen(BoxLayout):
         self.is_running = False
         self.is_live_mode = False
         
-        # Auto-start if enabled
+        # Auto-start check
         Clock.schedule_once(self.check_auto_start, 2)
     
     def check_auto_start(self, dt):
-        """Check if auto-start is enabled"""
         if self.app.store.exists('settings'):
             settings = self.app.store.get('settings')
             if settings.get('auto_start', False) and self.app.bot:
@@ -461,6 +446,24 @@ class MainScreen(BoxLayout):
     def add_log(self, msg):
         t = datetime.now().strftime('%H:%M:%S')
         self.log_text.text += f"[{t}] {msg}\n"
+    
+    def test_screenshot(self, instance):
+        """Test if screenshot works locally"""
+        self.add_log("Testing screenshot...")
+        
+        def test():
+            filepath = self.app.screenshot_handler.capture()
+            if filepath and os.path.exists(filepath):
+                size = os.path.getsize(filepath)
+                Clock.schedule_once(lambda dt: self.add_log(f"SUCCESS! Screenshot saved ({size} bytes)"))
+                Clock.schedule_once(lambda dt: self.add_log(f"Path: {filepath}"))
+                Clock.schedule_once(lambda dt: setattr(self.shizuku_label, 'text', '✅ Screenshot working!'))
+                Clock.schedule_once(lambda dt: setattr(self.shizuku_label, 'color', (0.2, 0.8, 0.2, 1)))
+            else:
+                Clock.schedule_once(lambda dt: self.add_log("FAILED! Screenshot not captured"))
+                Clock.schedule_once(lambda dt: self.add_log("Make sure Shizuku is running!"))
+        
+        threading.Thread(target=test).start()
     
     def toggle_service(self, instance):
         if self.is_running:
@@ -585,8 +588,8 @@ class MainScreen(BoxLayout):
                 except:
                     pass
             else:
-                Clock.schedule_once(lambda dt: self.add_log("Capture failed!"))
-                self.app.bot.send_message("❌ Screenshot capture failed!")
+                Clock.schedule_once(lambda dt: self.add_log("Capture failed! Check Shizuku"))
+                self.app.bot.send_message("❌ Screenshot capture failed!\nMake sure Shizuku is running.")
         except Exception as e:
             Clock.schedule_once(lambda dt, e=e: self.add_log(f"Error: {e}"))
     
